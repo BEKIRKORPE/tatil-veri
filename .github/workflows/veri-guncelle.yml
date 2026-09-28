@@ -1,12 +1,52 @@
-{
- "Deniz ve Plaj": "nwr[\"natural\"=\"beach\"][\"name\"](area.searchArea);nwr[\"leisure\"=\"beach_resort\"][\"name\"](area.searchArea);nwr[\"natural\"=\"bay\"][\"name\"](area.searchArea);",
- "__SU_ALTERNATIF__": "nwr[\"natural\"=\"water\"][\"water\"~\"^(lake|reservoir|lagoon)$\"][\"name\"](area.searchArea);nwr[\"waterway\"=\"waterfall\"][\"name\"](area.searchArea);nwr[\"natural\"=\"hot_spring\"][\"name\"](area.searchArea);",
- "Kamp Alanları": "nwr[\"tourism\"~\"^(camp_site|caravan_site)$\"][\"name\"](area.searchArea);",
- "Eğlence ve Gece Hayatı": "nwr[\"amenity\"~\"^(nightclub|bar|pub|cinema|theatre)$\"][\"name\"](area.searchArea);nwr[\"leisure\"~\"^(dance|amusement_arcade|bowling_alley)$\"][\"name\"](area.searchArea);",
- "Aktivite ve Spor": "nwr[\"leisure\"~\"^(sports_centre|stadium|swimming_pool|water_park|horse_riding)$\"][\"name\"](area.searchArea);nwr[\"sport\"][\"name\"](area.searchArea);",
- "Tarih ve Kültür": "nwr[\"historic\"][\"name\"](area.searchArea);nwr[\"tourism\"~\"^(museum|gallery|artwork)$\"][\"name\"](area.searchArea);nwr[\"amenity\"=\"place_of_worship\"][\"name\"](area.searchArea);nwr[\"man_made\"=\"bridge\"][\"name\"](area.searchArea);",
- "Aile Tatili": "nwr[\"leisure\"~\"^(park|playground|water_park|amusement_arcade)$\"][\"name\"](area.searchArea);nwr[\"tourism\"~\"^(zoo|aquarium|theme_park|picnic_site)$\"][\"name\"](area.searchArea);",
- "Ekonomik Tatil": "nwr[\"fee\"=\"no\"][\"tourism\"][\"name\"](area.searchArea);nwr[\"fee\"=\"no\"][\"leisure\"][\"name\"](area.searchArea);nwr[\"fee\"=\"no\"][\"natural\"][\"name\"](area.searchArea);nwr[\"leisure\"~\"^(park|garden|picnic_table)$\"][\"name\"](area.searchArea);nwr[\"tourism\"~\"^(viewpoint|picnic_site)$\"][\"name\"](area.searchArea);",
- "Yeme İçme": "nwr[\"amenity\"~\"^(restaurant|cafe|fast_food|food_court)$\"][\"name\"](area.searchArea);",
- "Doğa Tatili": "nwr[\"natural\"][\"name\"](area.searchArea);nwr[\"leisure\"~\"^(nature_reserve|park|garden)$\"][\"name\"](area.searchArea);nwr[\"tourism\"~\"^(viewpoint|picnic_site|attraction)$\"][\"name\"](area.searchArea);"
-}
+name: Tatil verisi güncelle
+
+on:
+  schedule:
+    - cron: "0 2 1 * *"      # her ayın 1'i, 02:00 UTC (05:00 TR)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Tüm dosyaları yeniden üret (1 = evet)"
+        required: false
+        default: "0"
+      only:
+        description: "Sadece bu iller (virgülle, ör. Muğla,Ankara). Boş = hepsi"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: veri-guncelle
+  cancel-in-progress: false
+
+jobs:
+  guncelle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Veriyi üret
+        env:
+          FORCE: ${{ github.event.inputs.force }}
+          ONLY: ${{ github.event.inputs.only }}
+        run: python scripts/build_data.py
+
+      - name: Değişiklikleri kaydet
+        if: always()
+        run: |
+          git config user.name "tatil-veri-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data
+          if git diff --cached --quiet; then
+            echo "Değişiklik yok."
+          else
+            git commit -m "Veri güncellendi: $(date -u +%Y-%m-%d)"
+            git push
+          fi
