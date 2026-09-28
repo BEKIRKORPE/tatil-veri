@@ -109,28 +109,70 @@ def fetch(query):
     return None
 
 
+# İsim yerine tür yazılmış kayıtlar ("Restaurant", "Kafe", "Park" ...)
+GENERIC_NAMES = {fold(x) for x in [
+    "restaurant", "restoran", "lokanta", "cafe", "kafe", "kahve", "bar", "pub", "büfe", "kantin",
+    "park", "çocuk parkı", "oyun parkı", "playground", "plaj", "beach", "halk plajı", "kamp", "camping",
+    "cami", "camii", "mescit", "mosque", "kilise", "church", "müze", "museum", "otopark", "parking",
+    "piknik alanı", "picnic site", "seyir terası", "viewpoint", "spor salonu", "gym", "sahil", "koy",
+]}
+# Tatil rehberinde öne çıkmaması gereken doğa kayıtları (zirve, burun, sırt...)
+LOW_NATURAL = {"peak", "cape", "ridge", "hill", "saddle", "rock", "stone", "tree", "wood", "scrub",
+               "grassland", "heath", "bare_rock", "scree", "shrubbery", "wetland", "arete", "volcano"}
+GOOD_NATURAL = {"beach", "bay", "waterfall", "cave_entrance", "hot_spring", "spring", "gorge", "valley",
+                "water", "lagoon", "canyon", "sinkhole"}
+
+
+def score(tags):
+    """Yerin rehberdeki önemi. Yüksek puan listede üstte."""
+    s = 0
+    if "wikipedia" in tags or "wikidata" in tags:
+        s += 5
+    if "image" in tags or "wikimedia_commons" in tags:
+        s += 2
+    if tags.get("tourism") in ("attraction", "viewpoint", "museum", "theme_park", "zoo", "aquarium"):
+        s += 3
+    for k in ("website", "contact:website", "opening_hours", "phone", "contact:phone", "cuisine", "description"):
+        if k in tags:
+            s += 1
+    nat = tags.get("natural")
+    if nat in GOOD_NATURAL:
+        s += 2
+    if nat in LOW_NATURAL and "tourism" not in tags:
+        s -= 7
+    return s
+
+
 def clean_elements(body):
-    """Adsızları atar, aynı adı bir kez tutar, tanınmışları öne alır, etiketleri küçültür."""
-    seen, notable, others = set(), [], []
-    for el in (body or {}).get("elements", []):
+    """Adsız, tür-adlı ve zincir kayıtları atar; aynı adı bir kez tutar; önemine göre sıralar."""
+    seen, rows = set(), []
+    for order, el in enumerate((body or {}).get("elements", [])):
         tags = el.get("tags") or {}
         name = (tags.get("name:tr") or tags.get("name") or "").strip()
         if len(name) < 2:
             continue
         key = fold(name)
-        if key in seen:
+        if key in seen or key in GENERIC_NAMES:
+            continue
+        if "brand" in tags or "brand:wikidata" in tags:   # McDonald's, Starbucks gibi zincirler
             continue
         seen.add(key)
+        sc = score(tags)
         small = {k: tags[k] for k in KEEP_TAGS if k in tags}
         if "wikidata" in small:
             small["wikidata"] = str(small["wikidata"])[:20]
+        if sc < 0:
+            # Uygulama Vikipedi kaydı olanları öne alır; zirve/burun gibi yerler öne çıkmasın
+            small.pop("wikipedia", None)
+            small.pop("wikidata", None)
         out = {"type": el.get("type", "node"), "id": el.get("id"), "tags": small}
         if "lat" in el and "lon" in el:
             out["lat"], out["lon"] = round(el["lat"], 6), round(el["lon"], 6)
         elif el.get("center"):
             out["center"] = {"lat": round(el["center"]["lat"], 6), "lon": round(el["center"]["lon"], 6)}
-        (notable if ("wikipedia" in small or "wikidata" in small) else others).append(out)
-    return (notable + others)[:MAX_ELEMENTS]
+        rows.append((-sc, order, out))
+    rows.sort(key=lambda r: (r[0], r[1]))
+    return [r[2] for r in rows][:MAX_ELEMENTS]
 
 
 def is_fresh(path):
