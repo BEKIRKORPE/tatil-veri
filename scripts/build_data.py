@@ -23,9 +23,9 @@ from datetime import datetime, timezone
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "data", "v1")
 USER_AGENT = "TatiliniPlanla-veri/1.0 (KorpeSoft; korpe.bekir71@gmail.com)"
+# kumi.systems denemelerde hiç yanıt vermedi (her seferinde 2 dk kayıp) — sadece ana sunucu
 ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
 ]
 FRESH_DAYS = 25            # bu kadar yeni dosyalar yeniden sorgulanmaz (yarıda kalan çalışma devam eder)
 TIME_BUDGET_S = 5 * 3600   # GitHub Actions 6 saat sınırının altında kal
@@ -48,6 +48,15 @@ PROVINCES = [
 FILTERS = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "filters.json"), encoding="utf-8"))
 CATEGORIES = ["Deniz ve Plaj", "Doğa Tatili", "Kamp Alanları", "Eğlence ve Gece Hayatı", "Aktivite ve Spor",
               "Tarih ve Kültür", "Aile Tatili", "Ekonomik Tatil", "Yeme İçme"]
+# Toplu üretimde ağır sorguları hafiflet: ildeki binlerce cami/köprü yerine
+# sadece tarihi olanlar veya Vikipedi kaydı olanlar (uygulamadaki canlı sorgu değişmez)
+FILTERS["Tarih ve Kültür"] = (
+    'nwr["historic"]["name"](area.searchArea);'
+    'nwr["tourism"~"^(museum|gallery)$"]["name"](area.searchArea);'
+    'nwr["amenity"="place_of_worship"]["historic"]["name"](area.searchArea);'
+    'nwr["amenity"="place_of_worship"]["wikidata"]["name"](area.searchArea);'
+    'nwr["man_made"="bridge"]["historic"]["name"](area.searchArea);'
+)
 WATER_ALT = "__SU_ALTERNATIF__"
 WATER_ALT_HEADING = "Göl, Şelale ve Su Kenarı"
 
@@ -74,13 +83,15 @@ def slug(s):
 
 
 def notable_filters(filters):
-    return filters.replace("(area.searchArea);", '[~"^(wikipedia|wikidata)$"~"."](area.searchArea);')
+    # Desen (regex) anahtar filtresi sunucuda çok yavaş (95 sn zaman aşımı); düz "wikidata" anahtarı hızlı.
+    # Vikipedi sayfası olan yerlerin neredeyse hepsinde wikidata da var.
+    return filters.replace("(area.searchArea);", '["wikidata"](area.searchArea);')
 
 
 def build_query(province, filters):
     area = ('area["name"="%s"]["boundary"="administrative"]["admin_level"="4"]->.searchArea;'
             % province.replace('"', ""))
-    return ("[out:json][timeout:90];" + area
+    return ("[out:json][timeout:180];" + area
             + "(" + notable_filters(filters) + ");out tags center 60;"
             + "(" + filters + ");out tags center 200;")
 
@@ -88,11 +99,11 @@ def build_query(province, filters):
 def fetch(query):
     """Overpass'a sorar. Başarılıysa dict, olmazsa None. 429/504'te bekleyip tekrar dener."""
     data = urllib.parse.urlencode({"data": query}).encode("utf-8")
-    for attempt in range(3):
+    for attempt in range(4):
         for endpoint in ENDPOINTS:
             req = urllib.request.Request(endpoint, data=data, headers={"User-Agent": USER_AGENT})
             try:
-                with urllib.request.urlopen(req, timeout=120) as r:
+                with urllib.request.urlopen(req, timeout=200) as r:
                     body = json.loads(r.read().decode("utf-8"))
                 remark = body.get("remark", "") or ""
                 if "runtime error" in remark or "timed out" in remark:
@@ -102,7 +113,7 @@ def fetch(query):
             except urllib.error.HTTPError as e:
                 print("   ! %s HTTP %s" % (endpoint.split("/")[2], e.code), flush=True)
                 if e.code in (429, 504):
-                    time.sleep(20 * (attempt + 1))
+                    time.sleep(30 * (attempt + 1))   # sunucu yoğun: giderek daha uzun bekle
             except Exception as e:  # zaman aşımı, bağlantı hatası
                 print("   ! %s %s" % (endpoint.split("/")[2], type(e).__name__), flush=True)
         time.sleep(10 * (attempt + 1))
