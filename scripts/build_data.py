@@ -14,7 +14,9 @@ import json
 import os
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +33,13 @@ FRESH_DAYS = 25            # bu kadar yeni dosyalar yeniden sorgulanmaz (yarıda
 TIME_BUDGET_S = 5 * 3600   # GitHub Actions 6 saat sınırının altında kal
 PAUSE_S = 3                # sunucuya nazik davran
 MAX_ELEMENTS = 60          # uygulama zaten en fazla 30 gösterir; sıralama için pay bırakılır
+WORKERS = 3                # aynı anda sorgu (Overpass IP başına 4 yuva veriyor, 1'i boş kalsın)
+PRINT_LOCK = threading.Lock()
+
+# Önce en çok aranan turistik iller üretilsin; kalanlar alfabetik
+PRIORITY = ["Antalya", "Muğla", "İzmir", "İstanbul", "Aydın", "Nevşehir", "Balıkesir", "Çanakkale", "Mersin",
+            "Trabzon", "Rize", "Artvin", "Bursa", "Ankara", "Denizli", "Bolu", "Sinop", "Mardin", "Gaziantep",
+            "Şanlıurfa", "Hatay", "Kastamonu", "Tekirdağ", "Edirne", "Konya", "Kayseri", "Van", "Kars"]
 
 PROVINCES = [
     "Adana", "Adıyaman", "Afyonkarahisar", "Ağrı", "Aksaray", "Amasya", "Ankara", "Antalya", "Ardahan",
@@ -56,6 +65,25 @@ FILTERS["Tarih ve Kültür"] = (
     'nwr["amenity"="place_of_worship"]["historic"]["name"](area.searchArea);'
     'nwr["amenity"="place_of_worship"]["wikidata"]["name"](area.searchArea);'
     'nwr["man_made"="bridge"]["historic"]["name"](area.searchArea);'
+)
+# Büyük şehirlerde binlerce çocuk parkı/ağaç/zirve taranmasın: sadece gezilecek türler
+FILTERS["Doğa Tatili"] = (
+    'nwr["natural"~"^(beach|bay|waterfall|cave_entrance|hot_spring|spring|gorge|valley|cliff|arch)$"]["name"](area.searchArea);'
+    'nwr["natural"="water"]["water"~"^(lake|reservoir|lagoon)$"]["name"](area.searchArea);'
+    'nwr["leisure"="nature_reserve"]["name"](area.searchArea);'
+    'nwr["boundary"="national_park"]["name"](area.searchArea);'
+    'nwr["tourism"~"^(viewpoint|picnic_site|attraction)$"]["name"](area.searchArea);'
+)
+FILTERS["Aile Tatili"] = (
+    'nwr["leisure"~"^(water_park|amusement_arcade|miniature_golf)$"]["name"](area.searchArea);'
+    'nwr["tourism"~"^(zoo|aquarium|theme_park|picnic_site)$"]["name"](area.searchArea);'
+    'nwr["leisure"="park"]["wikidata"]["name"](area.searchArea);'
+)
+FILTERS["Ekonomik Tatil"] = (
+    'nwr["fee"="no"]["tourism"]["name"](area.searchArea);'
+    'nwr["tourism"~"^(viewpoint|picnic_site)$"]["name"](area.searchArea);'
+    'nwr["leisure"="park"]["wikidata"]["name"](area.searchArea);'
+    'nwr["natural"~"^(beach|waterfall|spring)$"]["name"](area.searchArea);'
 )
 WATER_ALT = "__SU_ALTERNATIF__"
 WATER_ALT_HEADING = "Göl, Şelale ve Su Kenarı"
@@ -243,35 +271,56 @@ def write_index():
     write_json(os.path.join(OUT, "index.json"), index)
 
 
-def main(fetcher=fetch, pause=PAUSE_S):
+def ordered_provinces():
+    first = [p for p in PRIORITY if p in PROVINCES]
+    return first + [p for p in PROVINCES if p not in first]
+
+
+def log(msg):
+    with PRINT_LOCK:
+        print(msg, flush=True)
+
+
+def main(fetcher=fetch, pause=PAUSE_S, workers=WORKERS):
     only = [s.strip() for s in os.environ.get("ONLY", "").split(",") if s.strip()]
     only_keys = {fold(o) for o in only}
-    provinces = [p for p in PROVINCES if not only or fold(p) in only_keys]
+    provinces = [p for p in ordered_provinces() if not only or fold(p) in only_keys]
     started = time.time()
-    done = skipped = failed = 0
+    counts = {"done": 0, "skipped": 0, "failed": 0, "late": 0}
+    tasks = []
     for p in provinces:
         for c in CATEGORIES:
             path = os.path.join(OUT, slug(p), slug(c) + ".json")
             if is_fresh(path):
-                skipped += 1
-                continue
-            if time.time() - started > TIME_BUDGET_S:
-                print("Süre bütçesi doldu; kalanlar bir sonraki çalışmada tamamlanacak.")
-                write_index()
-                print("ÖZET: üretilen=%d atlanan=%d hatalı=%d" % (done, skipped, failed))
-                return 0
-            print("%s / %s" % (p, c), flush=True)
-            result = build_one(p, c, fetcher)
-            if result is None:
-                failed += 1
-                print("   x alınamadı, sonra tekrar denenecek", flush=True)
+                counts["skipped"] += 1
             else:
-                write_json(path, result)
-                done += 1
-                print("   ✓ %d yer" % len(result["elements"]), flush=True)
-            time.sleep(pause)
+                tasks.append((p, c, path))
+    log("Yapılacak: %d dosya (%d taze dosya atlandı), %d paralel" % (len(tasks), counts["skipped"], workers))
+
+    def work(task):
+        p, c, path = task
+        if time.time() - started > TIME_BUDGET_S:
+            with PRINT_LOCK:
+                counts["late"] += 1
+            return
+        result = build_one(p, c, fetcher)
+        if result is None:
+            with PRINT_LOCK:
+                counts["failed"] += 1
+            log("%s / %s: x alınamadı, sonra tekrar denenecek" % (p, c))
+        else:
+            write_json(path, result)
+            with PRINT_LOCK:
+                counts["done"] += 1
+            log("%s / %s: ✓ %d yer" % (p, c, len(result["elements"])))
+        time.sleep(pause)
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        list(ex.map(work, tasks))
+    if counts["late"]:
+        log("Süre bütçesi doldu; %d dosya bir sonraki çalışmada tamamlanacak." % counts["late"])
     write_index()
-    print("ÖZET: üretilen=%d atlanan=%d hatalı=%d" % (done, skipped, failed))
+    log("ÖZET: üretilen=%d atlanan=%d hatalı=%d kalan=%d" % (counts["done"], counts["skipped"], counts["failed"], counts["late"]))
     return 0
 
 
