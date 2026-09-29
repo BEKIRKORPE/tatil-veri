@@ -162,9 +162,20 @@ GOOD_NATURAL = {"beach", "bay", "waterfall", "cave_entrance", "hot_spring", "spr
                 "water", "lagoon", "canyon", "sinkhole"}
 
 
-def score(tags):
+NON_CAMP_WORDS = ("kafe", "cafe", "restaurant", "restoran", "lokanta", "bar", "otel", "hotel", "pansiyon", "apart")
+
+
+def score(tags, category=None):
     """Yerin rehberdeki önemi. Yüksek puan listede üstte."""
     s = 0
+    name = fold(tags.get("name:tr") or tags.get("name") or "")
+    # Deniz ve Plaj: "Gökova Körfezi" gibi koca körfezler plaj değil → en alta
+    if tags.get("natural") == "bay" and "korfez" in name:
+        s -= 9
+    # Kamp: adı kafe/otel/restoran olan kayıtlar (kamp kelimesi geçmiyorsa) → en alta
+    if category == "Kamp Alanları" and any(w in name.split() or name.startswith(w) or (" " + w) in name for w in NON_CAMP_WORDS) \
+            and not any(k in name for k in ("kamp", "camp")):
+        s -= 9
     if "wikipedia" in tags or "wikidata" in tags:
         s += 5
     if "image" in tags or "wikimedia_commons" in tags:
@@ -182,7 +193,7 @@ def score(tags):
     return s
 
 
-def clean_elements(body):
+def clean_elements(body, category=None):
     """Adsız, tür-adlı ve zincir kayıtları atar; aynı adı bir kez tutar; önemine göre sıralar."""
     seen, rows = set(), []
     for order, el in enumerate((body or {}).get("elements", [])):
@@ -196,7 +207,7 @@ def clean_elements(body):
         if "brand" in tags or "brand:wikidata" in tags:   # McDonald's, Starbucks gibi zincirler
             continue
         seen.add(key)
-        sc = score(tags)
+        sc = score(tags, category)
         small = {k: tags[k] for k in KEEP_TAGS if k in tags}
         if "wikidata" in small:
             small["wikidata"] = str(small["wikidata"])[:20]
@@ -240,12 +251,12 @@ def build_one(province, category, fetcher=fetch):
     body = fetcher(build_query(province, FILTERS[category]))
     if body is None:
         return None
-    elements = clean_elements(body)
+    elements = clean_elements(body, category)
     if category == "Deniz ve Plaj" and not elements:
         alt = fetcher(build_query(province, FILTERS[WATER_ALT]))
         if alt is None:
             return None
-        elements = clean_elements(alt)
+        elements = clean_elements(alt, category)
         if elements:
             heading = WATER_ALT_HEADING
     return {
