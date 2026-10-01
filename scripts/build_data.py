@@ -30,7 +30,7 @@ ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
 ]
 FRESH_DAYS = 25            # bu kadar yeni dosyalar yeniden sorgulanmaz (yarıda kalan çalışma devam eder)
-TIME_BUDGET_S = 5 * 3600   # GitHub Actions 6 saat sınırının altında kal
+TIME_BUDGET_S = 4 * 3600 + 900   # iş zaman aşımı 340 dk; yarım kalan sorgular + kayıt için ~85 dk pay
 PAUSE_S = 3                # sunucuya nazik davran
 MAX_ELEMENTS = 60          # uygulama zaten en fazla 30 gösterir; sıralama için pay bırakılır
 WORKERS = 3                # aynı anda sorgu (Overpass IP başına 4 yuva veriyor, 1'i boş kalsın)
@@ -56,7 +56,7 @@ PROVINCES = [
 # Uygulamadaki MainActivity.overpassFilters ile birebir aynı (değiştirirsen ikisini birlikte değiştir).
 FILTERS = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "filters.json"), encoding="utf-8"))
 CATEGORIES = ["Deniz ve Plaj", "Doğa Tatili", "Kamp Alanları", "Eğlence ve Gece Hayatı", "Aktivite ve Spor",
-              "Tarih ve Kültür", "Aile Tatili", "Ekonomik Tatil", "Yeme İçme"]
+              "Tarih ve Kültür", "Aile Tatili", "Ekonomik Tatil", "Yeme İçme", "Konaklama"]
 # Toplu üretimde ağır sorguları hafiflet: ildeki binlerce cami/köprü yerine
 # sadece tarihi olanlar veya Vikipedi kaydı olanlar (uygulamadaki canlı sorgu değişmez)
 FILTERS["Tarih ve Kültür"] = (
@@ -85,12 +85,14 @@ FILTERS["Ekonomik Tatil"] = (
     'nwr["leisure"="park"]["wikidata"]["name"](area.searchArea);'
     'nwr["natural"~"^(beach|waterfall|spring)$"]["name"](area.searchArea);'
 )
+# Konaklama: otel, pansiyon, hostel, motel, apart, bungalov (fiyat/rezervasyon yok — sadece telefon ve konum)
+FILTERS["Konaklama"] = 'nwr["tourism"~"^(hotel|guest_house|hostel|motel|apartment|chalet)$"]["name"](area.searchArea);'
 WATER_ALT = "__SU_ALTERNATIF__"
 WATER_ALT_HEADING = "Göl, Şelale ve Su Kenarı"
 
 # Uygulamanın ihtiyaç duyduğu etiketler (dosya küçük kalsın)
 KEEP_TAGS = ["name", "name:tr", "wikipedia", "wikidata", "phone", "contact:phone", "contact:mobile", "mobile",
-             "cuisine", "sport", "amenity", "leisure", "tourism", "natural", "waterway", "historic", "man_made"]
+             "cuisine", "sport", "amenity", "leisure", "tourism", "natural", "waterway", "historic", "man_made", "stars"]
 
 
 def turkish_lower(s):
@@ -185,6 +187,11 @@ def score(tags, category=None):
     for k in ("website", "contact:website", "opening_hours", "phone", "contact:phone", "cuisine", "description"):
         if k in tags:
             s += 1
+    if category == "Konaklama":
+        try:
+            s += min(5, int(re.sub(r"[^0-9].*$", "", str(tags.get("stars", "")) or "0") or 0))   # yıldız sayısı kadar
+        except ValueError:
+            pass
     nat = tags.get("natural")
     if nat in GOOD_NATURAL:
         s += 2
@@ -204,8 +211,8 @@ def clean_elements(body, category=None):
         key = fold(name)
         if key in seen or key in GENERIC_NAMES:
             continue
-        if "brand" in tags or "brand:wikidata" in tags:   # McDonald's, Starbucks gibi zincirler
-            continue
+        if ("brand" in tags or "brand:wikidata" in tags) and category != "Konaklama":
+            continue   # McDonald's, Starbucks gibi zincirler (otel zincirleri konaklamada kalır)
         seen.add(key)
         sc = score(tags, category)
         small = {k: tags[k] for k in KEEP_TAGS if k in tags}
