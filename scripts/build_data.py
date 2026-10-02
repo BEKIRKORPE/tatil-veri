@@ -25,10 +25,23 @@ from datetime import datetime, timezone
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "data", "v1")
 USER_AGENT = "TatiliniPlanla-veri/1.0 (KorpeSoft; korpe.bekir71@gmail.com)"
-# kumi.systems denemelerde hiç yanıt vermedi (her seferinde 2 dk kayıp) — sadece ana sunucu
+# 3 sunucu (uygulamayla aynı). Her sorgu sıradaki sunucudan başlar → yük ve kota dağılır.
+# kumi.systems denemelerde hiç yanıt vermediği için yok.
 ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
+_RR = {"n": 0}
+_RR_LOCK = threading.Lock()
+
+
+def _endpoint_order():
+    """Sıradaki sunucudan başlayan dönüşümlü sıra: 0,1,2 / 1,2,0 / 2,0,1 ..."""
+    with _RR_LOCK:
+        start = _RR["n"] % len(ENDPOINTS)
+        _RR["n"] += 1
+    return ENDPOINTS[start:] + ENDPOINTS[:start]
 FRESH_DAYS = 25            # bu kadar yeni dosyalar yeniden sorgulanmaz (yarıda kalan çalışma devam eder)
 TIME_BUDGET_S = 4 * 3600 + 900   # iş zaman aşımı 340 dk; yarım kalan sorgular + kayıt için ~85 dk pay
 PAUSE_S = 3                # sunucuya nazik davran
@@ -126,27 +139,32 @@ def build_query(province, filters):
             + "(" + filters + ");out tags center 200;")
 
 
-def fetch(query):
-    """Overpass'a sorar. Başarılıysa dict, olmazsa None. 429/504'te bekleyip tekrar dener."""
+def fetch(query, opener=None):
+    """Overpass'a sorar: 3 sunucu dönüşümlü, en fazla 2 tur. Başarılıysa dict, olmazsa None.
+    Olmayan sorgu bir sonraki çalıştırmada tekrar denenir; burada uzun ısrar edilmez (zaman kaybı)."""
+    opener = opener or urllib.request.urlopen
     data = urllib.parse.urlencode({"data": query}).encode("utf-8")
-    for attempt in range(4):
-        for endpoint in ENDPOINTS:
+    for attempt in range(2):
+        busy = False
+        for endpoint in _endpoint_order():
+            host = endpoint.split("/")[2]
             req = urllib.request.Request(endpoint, data=data, headers={"User-Agent": USER_AGENT})
             try:
-                with urllib.request.urlopen(req, timeout=200) as r:
+                with opener(req, timeout=150) as r:
                     body = json.loads(r.read().decode("utf-8"))
                 remark = body.get("remark", "") or ""
                 if "runtime error" in remark or "timed out" in remark:
-                    print("   ! sunucu notu:", remark[:120], flush=True)
+                    print("   ! %s sunucu notu: %s" % (host, remark[:100]), flush=True)
                     continue
                 return body
             except urllib.error.HTTPError as e:
-                print("   ! %s HTTP %s" % (endpoint.split("/")[2], e.code), flush=True)
+                print("   ! %s HTTP %s" % (host, e.code), flush=True)
                 if e.code in (429, 504):
-                    time.sleep(30 * (attempt + 1))   # sunucu yoğun: giderek daha uzun bekle
+                    busy = True
             except Exception as e:  # zaman aşımı, bağlantı hatası
-                print("   ! %s %s" % (endpoint.split("/")[2], type(e).__name__), flush=True)
-        time.sleep(10 * (attempt + 1))
+                print("   ! %s %s" % (host, type(e).__name__), flush=True)
+        if attempt == 0:
+            time.sleep(30 if busy else 10)
     return None
 
 
