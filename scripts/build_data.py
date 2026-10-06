@@ -47,6 +47,7 @@ TIME_BUDGET_S = 4 * 3600 + 900   # iş zaman aşımı 340 dk; yarım kalan sorgu
 PAUSE_S = 3                # sunucuya nazik davran
 MAX_ELEMENTS = 60          # uygulama zaten en fazla 30 gösterir; sıralama için pay bırakılır
 KONAKLAMA_MAX = 150        # konaklamada telefonlu kayıtlar çok; daha uzun liste
+EMPTY_FRESH_HOURS = 6      # boş çıkan dosya her çalışmada (6 saatten eskiyse) yeniden denenir
 # Dosya biçim sürümü: bir kategorinin sorgusu/sıralaması değişince artır.
 # Eski sürümlü dosyalar "taze" sayılmaz, bir sonraki çalışmada kendiliğinden yeniden üretilir.
 FILE_VERSION = {"Konaklama": 2}
@@ -275,9 +276,19 @@ def is_fresh(path, category=None):
             return False   # eski biçim → yeniden üret
         gen = obj.get("generated", "")
         age = datetime.now(timezone.utc) - datetime.fromisoformat(gen.replace("Z", "+00:00"))
+        if not obj.get("elements"):
+            return age.total_seconds() < EMPTY_FRESH_HOURS * 3600   # boş: hatalı yanıt olabilir, sık dene
         return age.days < FRESH_DAYS
     except Exception:
         return False
+
+
+def old_count(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return len(json.load(f).get("elements", []))
+    except Exception:
+        return 0
 
 
 def write_json(path, obj):
@@ -291,9 +302,16 @@ def write_json(path, obj):
 def build_one(province, category, fetcher=fetch):
     """Tek il/kategori dosyası üretir. Başarısızsa None döner (dosya yazılmaz)."""
     heading = category
-    body = fetcher(build_query(province, FILTERS[category], category))
+    query = build_query(province, FILTERS[category], category)
+    body = fetcher(query)
     if body is None:
         return None
+    if not (body.get("elements") or []):
+        # Bazı sunucular ağır sorguda hata vermeden BOŞ yanıt dönüyor (Trabzon olayı).
+        # Bir kez daha sor: dönüşümlü sıra sayesinde başka sunucuya gider.
+        again = fetcher(query)
+        if again and again.get("elements"):
+            body = again
     elements = clean_elements(body, category)
     if category == "Deniz ve Plaj" and not elements:
         alt = fetcher(build_query(province, FILTERS[WATER_ALT]))
@@ -361,7 +379,12 @@ def main(fetcher=fetch, pause=PAUSE_S, workers=WORKERS):
                 counts["late"] += 1
             return
         result = build_one(p, c, fetcher)
-        if result is None:
+        if result is not None and not result["elements"] and old_count(path) > 0:
+            # Dolu dosyayı boş yanıtla EZME (sunucu hatası olabilir). Eski veri kalır, sonra tekrar denenir.
+            with PRINT_LOCK:
+                counts["failed"] += 1
+            log("%s / %s: x boş yanıt geldi, eski %d kayıt korundu" % (p, c, old_count(path)))
+        elif result is None:
             with PRINT_LOCK:
                 counts["failed"] += 1
             log("%s / %s: x alınamadı, sonra tekrar denenecek" % (p, c))
