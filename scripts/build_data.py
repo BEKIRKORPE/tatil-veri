@@ -46,6 +46,11 @@ FRESH_DAYS = 25            # bu kadar yeni dosyalar yeniden sorgulanmaz (yarıda
 TIME_BUDGET_S = 4 * 3600 + 900   # iş zaman aşımı 340 dk; yarım kalan sorgular + kayıt için ~85 dk pay
 PAUSE_S = 3                # sunucuya nazik davran
 MAX_ELEMENTS = 60          # uygulama zaten en fazla 30 gösterir; sıralama için pay bırakılır
+KONAKLAMA_MAX = 150        # konaklamada telefonlu kayıtlar çok; daha uzun liste
+# Dosya biçim sürümü: bir kategorinin sorgusu/sıralaması değişince artır.
+# Eski sürümlü dosyalar "taze" sayılmaz, bir sonraki çalışmada kendiliğinden yeniden üretilir.
+FILE_VERSION = {"Konaklama": 2}
+PHONE_KEYS = ("phone", "contact:phone", "contact:mobile", "mobile")
 WORKERS = 3                # aynı anda sorgu (Overpass IP başına 4 yuva veriyor, 1'i boş kalsın)
 PRINT_LOCK = threading.Lock()
 
@@ -131,9 +136,17 @@ def notable_filters(filters):
     return filters.replace("(area.searchArea);", '["wikidata"](area.searchArea);')
 
 
-def build_query(province, filters):
+def build_query(province, filters, category=None):
     area = ('area["name"="%s"]["boundary"="administrative"]["admin_level"="4"]->.searchArea;'
             % province.replace('"', ""))
+    if category == "Konaklama":
+        # Önce TELEFONU OLAN tüm tesisler (500'e kadar), sonra Vikipedi kayıtlılar, sonra diğerleri.
+        # Kümeden süzme (nwr.k[...]) bölgeyi yeniden taramaz, hızlıdır.
+        return ("[out:json][timeout:180];" + area
+                + "(" + filters + ")->.k;"
+                + "(" + "".join('nwr.k["%s"];' % k for k in PHONE_KEYS) + ");out tags center 500;"
+                + 'nwr.k["wikidata"];out tags center 60;'
+                + ".k out tags center 200;")
     return ("[out:json][timeout:180];" + area
             + "(" + notable_filters(filters) + ");out tags center 60;"
             + "(" + filters + ");out tags center 200;")
@@ -206,6 +219,8 @@ def score(tags, category=None):
         if k in tags:
             s += 1
     if category == "Konaklama":
+        if any(tags.get(k) for k in PHONE_KEYS):
+            s += 20    # telefonu olan tesis her zaman üstte (uygulamada aranabilir)
         try:
             s += min(5, int(re.sub(r"[^0-9].*$", "", str(tags.get("stars", "")) or "0") or 0))   # yıldız sayısı kadar
         except ValueError:
@@ -247,15 +262,18 @@ def clean_elements(body, category=None):
             out["center"] = {"lat": round(el["center"]["lat"], 6), "lon": round(el["center"]["lon"], 6)}
         rows.append((-sc, order, out))
     rows.sort(key=lambda r: (r[0], r[1]))
-    return [r[2] for r in rows][:MAX_ELEMENTS]
+    return [r[2] for r in rows][:(KONAKLAMA_MAX if category == "Konaklama" else MAX_ELEMENTS)]
 
 
-def is_fresh(path):
+def is_fresh(path, category=None):
     if os.environ.get("FORCE") == "1" or not os.path.isfile(path):
         return False
     try:
         with open(path, encoding="utf-8") as f:
-            gen = json.load(f).get("generated", "")
+            obj = json.load(f)
+        if obj.get("v", 1) < FILE_VERSION.get(category, 1):
+            return False   # eski biçim → yeniden üret
+        gen = obj.get("generated", "")
         age = datetime.now(timezone.utc) - datetime.fromisoformat(gen.replace("Z", "+00:00"))
         return age.days < FRESH_DAYS
     except Exception:
@@ -273,7 +291,7 @@ def write_json(path, obj):
 def build_one(province, category, fetcher=fetch):
     """Tek il/kategori dosyası üretir. Başarısızsa None döner (dosya yazılmaz)."""
     heading = category
-    body = fetcher(build_query(province, FILTERS[category]))
+    body = fetcher(build_query(province, FILTERS[category], category))
     if body is None:
         return None
     elements = clean_elements(body, category)
@@ -284,7 +302,7 @@ def build_one(province, category, fetcher=fetch):
         elements = clean_elements(alt, category)
         if elements:
             heading = WATER_ALT_HEADING
-    return {
+    out = {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "province": province,
         "category": category,
@@ -292,6 +310,9 @@ def build_one(province, category, fetcher=fetch):
         "source": "© OpenStreetMap katkıda bulunanları (ODbL)",
         "elements": elements,
     }
+    if category in FILE_VERSION:
+        out["v"] = FILE_VERSION[category]
+    return out
 
 
 def write_index():
@@ -327,7 +348,7 @@ def main(fetcher=fetch, pause=PAUSE_S, workers=WORKERS):
     for p in provinces:
         for c in CATEGORIES:
             path = os.path.join(OUT, slug(p), slug(c) + ".json")
-            if is_fresh(path):
+            if is_fresh(path, c):
                 counts["skipped"] += 1
             else:
                 tasks.append((p, c, path))
