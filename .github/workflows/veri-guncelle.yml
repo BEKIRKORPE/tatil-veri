@@ -38,6 +38,13 @@ jobs:
           ONLY: ${{ github.event.inputs.only }}
         run: python scripts/build_data.py
 
+      - name: Vitrin fotoğraflarını üret
+        if: always()
+        continue-on-error: true
+        env:
+          ONLY: ${{ github.event.inputs.only }}
+        run: python scripts/build_vitrin.py
+
       - name: Değişiklikleri kaydet
         if: always()
         run: |
