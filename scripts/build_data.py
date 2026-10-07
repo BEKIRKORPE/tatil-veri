@@ -137,9 +137,13 @@ def notable_filters(filters):
     return filters.replace("(area.searchArea);", '["wikidata"](area.searchArea);')
 
 
+# OSM'deki il adı uygulamadakinden farklı yazılan iller (OSM: "Elâzığ", relation 223443)
+OSM_NAMES = {"Elazığ": "Elâzığ"}
+
+
 def build_query(province, filters, category=None):
     area = ('area["name"="%s"]["boundary"="administrative"]["admin_level"="4"]->.searchArea;'
-            % province.replace('"', ""))
+            % OSM_NAMES.get(province, province).replace('"', ""))
     if category == "Konaklama":
         # Önce TELEFONU OLAN tüm tesisler (500'e kadar), sonra Vikipedi kayıtlılar, sonra diğerleri.
         # Kümeden süzme (nwr.k[...]) bölgeyi yeniden taramaz, hızlıdır.

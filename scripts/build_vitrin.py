@@ -34,7 +34,7 @@ import build_data as bd   # il listesi, slug, fold, write_json ortak
 
 OUT = bd.OUT
 USER_AGENT = "TatiliniPlanla-vitrin/1.0 (KorpeSoft; korpe.bekir71@gmail.com)"
-VERSION = 1
+VERSION = 2                # 2: kişi/bölge/stadyum elendi (yanlış Vikipedi bağlantısı okunmayı şişiriyordu)
 FRESH_DAYS = 30            # ayda bir yenilenir → "o yılın popüler yerleri" kendiliğinden güncellenir
 TOP_PLACES = 10            # il başına yer
 MAX_PHOTOS = 8
@@ -47,12 +47,25 @@ COUNTRY_PER_PROVINCE = 2
 TIME_BUDGET_S = 70 * 60
 WORKERS = 4
 THUMB_WIDTH = 1280
-SKIP_CATEGORIES = {"yeme-icme", "konaklama"}
+SKIP_CATEGORIES = {"yeme-icme", "konaklama", "aktivite-ve-spor"}   # stadyum vb. tatil vitrinine uygun değil
 OK_LICENSE = re.compile(r"^(cc0|cc[- ]by(-sa)?([- ]\d(\.\d)?)?.*|public domain|pd.*|attribution.*)$", re.I)
 NONCOMMERCIAL = re.compile(r"(\bn[cd]\b|non[- ]?commercial|no[- ]?deriv)", re.I)   # reklamlı uygulama: NC/ND yasak
 BAD_TITLE = re.compile(r"(map|harita|plan|logo|flag|bayrak|coat|arma|diagram|chart|locator|svg|\.tif|"
                        r"inscription|yazıt|coin|sikke|stamp|pul|drawing|çizim)", re.I)
 
+# Vikidata "nedir" (P31) türleri: bunlar gezilecek yer değil. OSM'deki bağlantı yanlış konuya gidince
+# (ör. "İsmet İnönü Lahdi" → İsmet İnönü kişisi, "Asia Minor" → Anadolu) okunma sayısı şişiyor.
+BAD_P31 = {
+    "Q5",          # insan
+    "Q82794",      # coğrafi bölge
+    "Q1620908",    # tarihî bölge
+    "Q34763",      # yarımada
+    "Q5107",       # kıta
+    "Q515", "Q1549591", "Q486972", "Q15284", "Q1637706", "Q3957",   # şehir, büyükşehir, yerleşim, belediye, kasaba
+    "Q483110", "Q1154710", "Q19842071",                             # stadyum, futbol stadyumu
+    "Q4830453", "Q46970",                                           # şirket, havayolu
+    "Q6256", "Q7275",                                               # ülke, devlet
+}
 API_WD = "https://www.wikidata.org/w/api.php"
 API_COMMONS = "https://commons.wikimedia.org/w/api.php"
 API_PV = "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/%s/all-access/user/%s/monthly/%s/%s"
@@ -143,7 +156,14 @@ def wikidata_info(qids, fetch=http_json):
                 except (KeyError, IndexError, TypeError):
                     return None
             links = ent.get("sitelinks") or {}
+            p31 = set()
+            for c in claims.get("P31") or []:
+                try:
+                    p31.add(c["mainsnak"]["datavalue"]["value"]["id"])
+                except (KeyError, TypeError):
+                    pass
             info[q] = {
+                "bad": bool(p31 & BAD_P31),
                 "trwiki": (links.get("trwiki") or {}).get("title"),
                 "enwiki": (links.get("enwiki") or {}).get("title"),
                 "image": first("P18"),
@@ -239,9 +259,12 @@ def build_province(province, fetch=http_json):
     for c in cands:
         wd = wdinfo.get(c["wikidata"] or "", {})
         c["_wd"] = wd
+        if wd.get("bad") or not (wd.get("image") or wd.get("commonscat")):
+            c["views"] = 0
+            continue
         c["views"] = (pageviews("tr.wikipedia", wiki_title(c, wd, "tr"), start, end, fetch)
                       + pageviews("en.wikipedia", wiki_title(c, wd, "en"), start, end, fetch))
-    cands = [c for c in cands if c["_wd"].get("image") or c["_wd"].get("commonscat")]
+    cands = [c for c in cands if (c["_wd"].get("image") or c["_wd"].get("commonscat")) and not c["_wd"].get("bad")]
     cands.sort(key=lambda c: -c["views"])
     good, ok = [], []
     for c in cands[:CANDIDATES]:
