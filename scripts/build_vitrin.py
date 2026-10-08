@@ -34,7 +34,8 @@ import build_data as bd   # il listesi, slug, fold, write_json ortak
 
 OUT = bd.OUT
 USER_AGENT = "TatiliniPlanla-vitrin/1.0 (KorpeSoft; korpe.bekir71@gmail.com)"
-VERSION = 2                # 2: kişi/bölge/stadyum elendi (yanlış Vikipedi bağlantısı okunmayı şişiriyordu)
+VERSION = 3                # 3: katliam/soykırım anıtları elendi, Türkiye vitrininde aynı yer tekrar etmez, müze/maket fotoğrafı sona
+                           # 2: kişi/bölge/stadyum elendi (yanlış Vikipedi bağlantısı okunmayı şişiriyordu)
 FRESH_DAYS = 30            # ayda bir yenilenir → "o yılın popüler yerleri" kendiliğinden güncellenir
 TOP_PLACES = 10            # il başına yer
 MAX_PHOTOS = 8
@@ -51,7 +52,11 @@ SKIP_CATEGORIES = {"yeme-icme", "konaklama", "aktivite-ve-spor"}   # stadyum vb.
 OK_LICENSE = re.compile(r"^(cc0|cc[- ]by(-sa)?([- ]\d(\.\d)?)?.*|public domain|pd.*|attribution.*)$", re.I)
 NONCOMMERCIAL = re.compile(r"(\bn[cd]\b|non[- ]?commercial|no[- ]?deriv)", re.I)   # reklamlı uygulama: NC/ND yasak
 BAD_TITLE = re.compile(r"(map|harita|plan|logo|flag|bayrak|coat|arma|diagram|chart|locator|svg|\.tif|"
-                       r"inscription|yazıt|coin|sikke|stamp|pul|drawing|çizim)", re.I)
+                       r"inscription|yazıt|coin|sikke|stamp|pul|drawing|çizim|massacre|katliam|refugee|mülteci|corpse|ceset)", re.I)
+# Tatil vitrinine uygun olmayan acı olay anıtları (yer listesinde kalır, sadece vitrine girmez)
+SENSITIVE_NAME = re.compile(r"(katliam|soyk[ıi]r[ıi]m|massacre|genocide|terör|faciası|felaketi)", re.I)
+# Yerin kendisini göstermeyen fotoğraflar (müze, maket, rekonstrüksiyon) sona alınır
+WEAK_PHOTO = re.compile(r"(museum|müze|muzesi|model|maket|replica|replika|reconstruction|rekonstr)", re.I)
 
 # Vikidata "nedir" (P31) türleri: bunlar gezilecek yer değil. OSM'deki bağlantı yanlış konuya gidince
 # (ör. "İsmet İnönü Lahdi" → İsmet İnönü kişisi, "Asia Minor" → Anadolu) okunma sayısı şişiyor.
@@ -120,7 +125,7 @@ def candidates_for(province):
                 continue
             name = (t.get("name:tr") or t.get("name") or "").strip()
             key = bd.fold(name)
-            if not name or key in seen:
+            if not name or key in seen or SENSITIVE_NAME.search(name):
                 continue
             seen.add(key)
             c = el.get("center") or {}
@@ -241,6 +246,10 @@ def photos_for(place, wd, fetch=http_json):
         add_pages(fetch(API_COMMONS, dict(II_PROPS, action="query", generator="categorymembers",
                                          gcmtitle="Category:" + wd["commonscat"], gcmtype="file",
                                          gcmlimit=40)))
+    # İlk fotoğraf vitrinde en çok görünen: müze/maket fotoğrafı varsa sona al (sıralama kararlı)
+    # (Yerin kendisi müzeyse dokunulmaz: "Adana Müzesi"nin müze fotoğrafı doğrudur.)
+    if not WEAK_PHOTO.search(place.get("name", "")):
+        picks.sort(key=lambda ph: 1 if WEAK_PHOTO.search(ph.get("page", "") + " " + ph.get("url", "")) else 0)
     return picks
 
 
@@ -322,9 +331,23 @@ def write_country():
             continue
         with open(path, encoding="utf-8") as f:
             obj = json.load(f)
-        for i, pl in enumerate(obj.get("places", [])[:COUNTRY_PER_PROVINCE]):
+        for pl in obj.get("places", []):
+            if SENSITIVE_NAME.search(pl.get("name", "")):
+                continue
             rows.append(dict(pl, province=p, provinceSlug=bd.slug(p), photos=pl["photos"][:4]))
     rows.sort(key=lambda r: -r.get("views", 0))
+    # Van Gölü, Tuz Gölü gibi birden çok ile yayılan yerler bir kez girer; il başına en fazla 2
+    picked, seen, per_prov = [], set(), {}
+    for r in rows:
+        keys = {r.get("osm") or "", bd.fold(r.get("name", ""))} - {""}
+        if keys & seen or per_prov.get(r["province"], 0) >= COUNTRY_PER_PROVINCE:
+            continue
+        seen |= keys
+        per_prov[r["province"]] = per_prov.get(r["province"], 0) + 1
+        picked.append(r)
+        if len(picked) >= COUNTRY_PLACES:
+            break
+    rows = picked
     bd.write_json(os.path.join(OUT, "vitrin.json"), {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "v": VERSION,
